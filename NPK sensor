@@ -1,0 +1,399 @@
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <ArduinoOTA.h>
+#include <SimpleTimer.h>
+#include <SoftwareSerial.h>
+#include <SensirionI2CScd4x.h>
+#include <Wire.h>
+
+SensirionI2CScd4x scd4x;
+
+#define RE 14
+#define DE 15
+SimpleTimer timer;
+
+const uint32_t TIMEOUT = 500UL;
+unsigned long lastMillis = 0;
+   
+const byte ph[]     = {0x01,0x03,0x00,0x03,0x00,0x01,0x74,0x0A};
+const byte moist[]  = {0x01,0x03,0x00,0x00,0x00,0x01,0x84,0x0A};
+const byte temp[]   = {0x01,0x03,0x00,0x01,0x00,0x01,0xD5,0xCA};
+const byte ec[]     = {0x01,0x03,0x00,0x02,0x00,0x01,0x25,0xCA};
+const byte nitro[]  = {0x01,0x03,0x00,0x04,0x00,0x01,0xC5,0xCB};
+//const byte nitro[]  = {0x01,0x03,0x00,0x04,0x00,0x01,0xCE,0x73};
+const byte phos[]   = {0x01,0x03,0x00,0x05,0x00,0x01,0x94,0x0B};
+const byte pota[]   = {0x01,0x03,0x00,0x06,0x00,0x01,0x64,0x0B};
+
+
+byte values[11];
+byte values_moist[11];
+byte values_temp[11];
+byte values_ph[11];
+byte values_ec[11];
+byte values_nitro[11];
+byte values_phos[11];
+byte values_pota[11];
+
+float val_moist;
+float val_temp;
+float val_ph;
+int val_ec;
+int val_ec_adj;
+int val_nitro;
+int val_phos;
+int val_pota;
+
+uint16_t co2 = 0;
+float temperature = 0.0f;
+float humidity = 0.0f;
+bool isDataReady = false;
+uint16_t error;
+float LastMaxHumidity = 0;
+
+int err99 = 99;
+int err1 = 1;
+int err2 = 2;
+int err3 = 3;
+
+char auth[] = "BLABLA"; //VASO
+
+char ssid[] = "FASTWEB-BLA";
+char pass[] = "BLABLA";
+
+SoftwareSerial mod(12,16); // RX, TX ( Creates a new SoftwareSerial object )
+
+void setup()
+{
+  Serial.begin(9600);
+  mod.begin(4800);
+  pinMode(RE, OUTPUT);
+  pinMode(DE, OUTPUT);
+
+  Blynk.begin(auth, ssid, pass, IPAddress(34,66,39,107), 8080);
+  Blynk.syncAll();
+  ArduinoOTA.setHostname("VASO");
+  ArduinoOTA.begin();
+ 
+  timer.setInterval(1000L, CO_CHECK);
+
+  Wire.begin();
+  scd4x.begin(Wire);
+  
+ error = scd4x.startPeriodicMeasurement();
+}
+
+void loop()
+{
+  Blynk.run();
+        ArduinoOTA.handle();
+    
+   
+
+    lastMillis = millis();
+    Blynk.virtualWrite(V0, lastMillis/1000);
+    
+  val_moist = moisture();
+////  memset(values1,0,sizeof(values1));
+    Blynk.virtualWrite(V1, val_moist);
+//delay(1000); 
+
+  val_temp = temperatura();
+     Blynk.virtualWrite(V2, val_temp);
+//delay(1000);
+
+  val_ec = ec_call();
+   Blynk.virtualWrite(V3, val_ec);
+//delay(1000);  
+
+if ( LastMaxHumidity < val_moist )  { LastMaxHumidity = val_moist; }
+  else {LastMaxHumidity = LastMaxHumidity;}
+
+val_ec_adj = val_ec * ( 1 + ( LastMaxHumidity - val_moist ) / 100 );
+   Blynk.virtualWrite(V14, val_ec_adj);
+
+  val_ph = ph_call();
+   Blynk.virtualWrite(V4, val_ph);
+
+delay(1000);  
+
+//  val_nitro = nitro_call();
+//   Blynk.virtualWrite(V5, val_nitro);
+////delay(1000);  
+//
+//  val_phos = phos_call();
+//   Blynk.virtualWrite(V6, val_phos);
+////delay(1000);  
+//
+//  val_pota = pota_call();
+//   Blynk.virtualWrite(V7, val_pota);
+//delay(1000);  
+
+Blynk.virtualWrite(V13, err99);
+
+delay(500);
+
+error = scd4x.getDataReadyFlag(isDataReady);
+    if (error) {
+        Blynk.virtualWrite(V13, err1);
+        return;
+    }
+    if (!isDataReady) {
+        return;
+    }
+    error = scd4x.readMeasurement(co2, temperature, humidity);
+
+    if (error) {
+        Blynk.virtualWrite(V13, err2);
+    } else if (co2 == 0) {
+        Blynk.virtualWrite(V13, err3);
+    } else {
+      
+      Blynk.virtualWrite(V10, co2);
+      Blynk.virtualWrite(V11, temperature);
+      Blynk.virtualWrite(V12, humidity);
+
+    }
+
+}
+
+
+
+  
+float moisture(){
+  float MOIST3and4;
+  
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+  
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(moist,sizeof(moist));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_moist) ) {
+      values_moist[byteCount++] = mod.read();
+      //printHexByte(values_moist[byteCount-1]);
+    }
+  }
+  
+//    MOIST3and4 = (((values_moist[3] * 256.0) + values_moist[4])/10); // converting hexadecimal to decimal
+      MOIST3and4 = (( (values_moist[3]<<8)|values_moist[4])+0.0)/10; 
+//      float combined = (((values_moist[3]<<8)|values_moist[4])/10 + 0.0);
+  return MOIST3and4;
+}
+void CO_CHECK()
+{
+/*
+Blynk.virtualWrite(V13, err99);
+
+delay(500);
+
+error = scd4x.getDataReadyFlag(isDataReady);
+    if (error) {
+        Blynk.virtualWrite(V13, err1);
+        return;
+    }
+    if (!isDataReady) {
+        return;
+    }
+    error = scd4x.readMeasurement(co2, temperature, humidity);
+
+    if (error) {
+        Blynk.virtualWrite(V13, err2);
+    } else if (co2 == 0) {
+        Blynk.virtualWrite(V13, err3);
+    } else {
+      
+      Blynk.virtualWrite(V10, co2);
+      Blynk.virtualWrite(V11, temperature);
+      Blynk.virtualWrite(V12, humidity);
+
+    }
+    */
+}
+
+void CO_CHECK()
+{
+/*
+Blynk.virtualWrite(V13, err99);
+
+delay(500);
+
+error = scd4x.getDataReadyFlag(isDataReady);
+    if (error) {
+        Blynk.virtualWrite(V13, err1);
+        return;
+    }
+    if (!isDataReady) {
+        return;
+    }
+    error = scd4x.readMeasurement(co2, temperature, humidity);
+
+    if (error) {
+        Blynk.virtualWrite(V13, err2);
+    } else if (co2 == 0) {
+        Blynk.virtualWrite(V13, err3);
+    } else {
+      
+      Blynk.virtualWrite(V10, co2);
+      Blynk.virtualWrite(V11, temperature);
+      Blynk.virtualWrite(V12, humidity);
+
+    }
+    */
+}
+
+
+
+float ec_call(){
+  float EC3and4;  
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+  
+
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(ec,sizeof(ec));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_ec) ) {
+      values_ec[byteCount++] = mod.read();
+    }
+  }
+  
+//    EC3and4 = (((values_ec[3] * 256.0) + values_ec[4])/10); // converting hexadecimal to decimal
+  uint16_t combined = (values_ec[3]<<8)|values_ec[4];
+  return combined;
+}
+
+
+float pota_call(){
+
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+  
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(pota,sizeof(pota));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_pota) ) {
+      values_pota[byteCount++] = mod.read();
+    }
+  }
+  uint16_t combined = ((values_pota[3]<<8)|values_pota[4]);
+  return combined;
+}
+
+float nitro_call(){
+
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+  
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(nitro,sizeof(nitro));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_nitro) ) {
+      values_nitro[byteCount++] = mod.read();
+    }
+  }
+  uint16_t combined = ((values_nitro[3]<<8)|values_nitro[4]);
+  return combined;
+}
+
+
+float phos_call(){
+
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+  
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(phos,sizeof(phos));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_phos) ) {
+      values_phos[byteCount++] = mod.read();
+    }
+  }
+  uint16_t combined = ((values_phos[3]<<8)|values_phos[4]);
+  return combined;
+}
+
+
+float ph_call(){
+  float PH3and4;    
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(ph,sizeof(ph));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_ph) ) {
+      values_ph[byteCount++] = mod.read();
+    }
+  }
+//  PH3and4 = (((values_ph[3] * 256.0) + values_ph[4])/10); // converting hexadecimal to decimal
+PH3and4 = (( (values_ph[3]<<8)|values_ph[4])+0.0)/10;
+//  uint16_t combined = ((values_ph[3]<<8)|values_ph[4])/10;
+  return PH3and4;
+}
+
+
+float temperatura(){
+  float TEMP3and4;    
+  uint32_t startTime = 0;
+  uint8_t  byteCount = 0;
+
+  digitalWrite(DE,HIGH);
+  digitalWrite(RE,HIGH);
+  delay(10);
+  mod.write(temp,sizeof(temp));
+    mod.flush();
+    digitalWrite(DE,LOW);
+    digitalWrite(RE,LOW);
+     startTime = millis();
+  while ( millis() - startTime <= TIMEOUT ) {
+    if (mod.available() && byteCount<sizeof(values_temp) ) {
+      values_temp[byteCount++] = mod.read();
+    }
+  }
+    //TEMP3and4 = (((values_temp[3] * 256.0) + values_temp[4])/10); // converting hexadecimal to decimal
+    TEMP3and4 = (( (values_temp[3]<<8)|values_temp[4])+0.0)/10;
+  
+  //float combined = ((values_temp[4])/10);
+  return TEMP3and4;
+}
